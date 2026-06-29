@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>チャット</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ログイン画面 -->
+  <div id="login-screen" class="login-screen">
+    <div class="login-card">
+      <div class="login-logo">💬</div>
+      <h1 class="login-title">チャットに参加</h1>
+      <p class="login-sub">ニックネームを入力してください</p>
+      <input
+        id="username-input"
+        class="login-input"
+        type="text"
+        placeholder="例: 田中さん"
+        maxlength="20"
+        autocomplete="off"
+        autofocus
+      >
+      <button id="join-btn" class="join-btn">参加する</button>
+      <p id="login-error" class="login-error"></p>
+    </div>
+  </div>
+
+  <!-- チャット画面 -->
+  <div id="chat-screen" class="chat-screen hidden">
+
+    <!-- ヘッダー -->
+    <header class="chat-header">
+      <div class="header-left">
+        <span class="header-icon">💬</span>
+        <span class="header-title">みんなのチャット</span>
+      </div>
+      <div class="header-right">
+        <span class="online-badge">
+          <span class="online-dot"></span>
+          <span id="online-count">0</span> 人オンライン
+        </span>
+      </div>
+    </header>
+
+    <!-- メッセージ一覧 -->
+    <main id="message-list" class="message-list">
+      <!-- メッセージがここに追加される -->
+    </main>
+
+    <!-- 入力エリア -->
+    <footer class="chat-footer">
+      <input
+        id="message-input"
+        class="message-input"
+        type="text"
+        placeholder="メッセージを入力..."
+        maxlength="500"
+        autocomplete="off"
+      >
+      <button id="send-btn" class="send-btn" aria-label="送信">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"></line>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        </svg>
+      </button>
+    </footer>
+
+  </div>
+
+  <script src="chat.js"></script>
+</body>
+</html>
