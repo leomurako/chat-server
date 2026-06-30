@@ -9,8 +9,51 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
+// 画像アップロードは1枚あたり最大6MB（base64化で約4.5MB相当の画像まで許容）
+app.use(express.json({ limit: '6mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/health', (_req, res) => res.send('ok'));
+
+// ========== 画像アップロード（HTTP経由） ==========
+const UPLOADS_DIR = path.join(__dirname, 'public', 'uploads');
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+const ALLOWED_IMAGE_TYPES = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+};
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB
+
+app.post('/upload', (req, res) => {
+  try {
+    const { dataUrl } = req.body || {};
+    if (!dataUrl || typeof dataUrl !== 'string') {
+      return res.status(400).json({ error: '画像データがありません' });
+    }
+    const match = dataUrl.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
+    if (!match) return res.status(400).json({ error: '画像形式が不正です' });
+
+    const mime = match[1];
+    const ext = ALLOWED_IMAGE_TYPES[mime];
+    if (!ext) return res.status(400).json({ error: '対応していない画像形式です（jpg/png/gif/webpのみ）' });
+
+    const base64 = match[2];
+    const buffer = Buffer.from(base64, 'base64');
+    if (buffer.length > MAX_IMAGE_BYTES) {
+      return res.status(400).json({ error: '画像サイズが大きすぎます（5MBまで）' });
+    }
+
+    const filename = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}.${ext}`;
+    fs.writeFileSync(path.join(UPLOADS_DIR, filename), buffer);
+
+    res.json({ url: `/uploads/${filename}` });
+  } catch (e) {
+    console.error('upload error:', e.message);
+    res.status(500).json({ error: 'アップロードに失敗しました' });
+  }
+});
 
 // ========== 永続化（JSONファイル） ==========
 const DATA_DIR = path.join(__dirname, 'data');
@@ -125,9 +168,16 @@ wss.on('connection', ws => {
 
       session.username = username;
       const u = users.get(username);
+      if (!u.lastRead) u.lastRead = {}; // { roomCode: timestamp }
+
       const joinedRoomList = (u.joinedRooms || []).map(code => {
         const r = rooms.get(code);
-        return r ? { code, name: r.name, icon: r.icon } : null;
+        if (!r) return null;
+        const lastReadAt = u.lastRead[code] || 0;
+        const unreadCount = (r.messages || []).filter(m =>
+          !m.recalled && m.username !== username && (m.createdAt || 0) > lastReadAt
+        ).length;
+        return { code, name: r.name, icon: r.icon, unreadCount };
       }).filter(Boolean);
 
       send(ws, { type: 'authOk', username, joinedRooms: joinedRoomList });
@@ -177,6 +227,15 @@ wss.on('connection', ws => {
       if (!room) return send(ws, { type: 'error', text: 'ルームが見つかりません' });
       if (!room.members.includes(session.username)) return send(ws, { type: 'error', text: '参加していないルームです' });
       session.roomCode = code;
+
+      // 既読位置を更新（このルームの未読を0にする）
+      const u = users.get(session.username);
+      if (u) {
+        if (!u.lastRead) u.lastRead = {};
+        u.lastRead[code] = Date.now();
+        scheduleSave();
+      }
+
       send(ws, { type: 'history', messages: room.messages.slice(-100).map(serializeMsg) });
       const sysMsg = { type: 'system', text: `${session.username} さんが入室しました`, count: onlineInRoom(code) };
       send(ws, sysMsg);
@@ -184,20 +243,35 @@ wss.on('connection', ws => {
       return;
     }
 
+    // ---- ルーム退出（チャット画面を閉じてホームに戻る） ----
+    if (data.type === 'leaveRoomView') {
+      session.roomCode = null;
+      return;
+    }
+
     if (!session.roomCode) return;
     const room = rooms.get(session.roomCode);
     if (!room) return;
 
-    // ---- メッセージ送信 ----
+    // ---- メッセージ送信（テキスト or 画像） ----
     if (data.type === 'message') {
       const text = (data.text || '').trim().slice(0, 500);
-      if (!text) return;
+      const imageUrl = typeof data.imageUrl === 'string' ? data.imageUrl : null;
+
+      // テキストも画像もない場合は無視
+      if (!text && !imageUrl) return;
+
+      // imageUrlは自分のサーバーが発行した /uploads/ 配下のみ許可（不正な外部URL注入を防止）
+      if (imageUrl && !/^\/uploads\/[a-zA-Z0-9_.\-]+$/.test(imageUrl)) return;
+
       const time = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
       const msg = {
         id: genMsgId(),
         type: 'message',
         username: session.username,
         text, time,
+        createdAt: Date.now(),
+        imageUrl,
         replyTo: data.replyTo || null,
         editHistory: [],
         recalled: false,
@@ -205,8 +279,43 @@ wss.on('connection', ws => {
       };
       room.messages.push(msg);
       if (room.messages.length > 200) room.messages.shift();
+
+      // ルームの最終更新時刻を記録（未読バッジ計算用）
+      room.lastMessageAt = Date.now();
+
       scheduleSave();
       broadcastRoomAll(session.roomCode, serializeMsg(msg));
+
+      // このルームを「今開いていない」参加メンバーに未読バッジ更新を通知
+      room.members.forEach(memberName => {
+        if (memberName === session.username) return;
+        wss.clients.forEach(clientWs => {
+          const s = sessions.get(clientWs);
+          if (s && s.username === memberName && s.roomCode !== session.roomCode && clientWs.readyState === WebSocket.OPEN) {
+            send(clientWs, {
+              type: 'unreadUpdate',
+              roomCode: session.roomCode,
+              roomName: room.name,
+              roomIcon: room.icon,
+              fromUser: session.username,
+              preview: imageUrl ? '📷 画像' : text,
+            });
+          }
+        });
+      });
+
+      // メッセージを送ったら、そのユーザー自身のタイピング状態は強制終了
+      broadcastRoom(session.roomCode, { type: 'typing', username: session.username, isTyping: false }, ws);
+      return;
+    }
+
+    // ---- タイピング中通知 ----
+    if (data.type === 'typing') {
+      broadcastRoom(session.roomCode, {
+        type: 'typing',
+        username: session.username,
+        isTyping: !!data.isTyping,
+      }, ws);
       return;
     }
 
