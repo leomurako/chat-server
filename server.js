@@ -4,10 +4,17 @@ const WebSocket = require('ws');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
+const cors = require('cors');
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
+
+app.use(cors({
+  origin: ['https://leomurako.github.io', 'http://localhost:5500', 'http://127.0.0.1:5500', 'http://localhost:3000'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  credentials: true
+}));
 
 // 画像アップロードは1枚あたり最大6MB（base64化で約4.5MB相当の画像まで許容）
 app.use(express.json({ limit: '6mb' }));
